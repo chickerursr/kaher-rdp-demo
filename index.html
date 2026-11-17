@@ -1,0 +1,275 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KAHER Research Data Platform: laptop demo</title>
+<style>
+:root{--fg:#1f2328;--muted:#59636e;--border:#d1d9e0;--bg:#fff;--code:#f6f8fa;--link:#0969da}
+@media (prefers-color-scheme:dark){:root{--fg:#e6edf3;--muted:#9198a1;--border:#3d444d;--bg:#0d1117;--code:#151b23;--link:#4493f8}}
+html{background:var(--bg)}
+body{margin:0;color:var(--fg);background:var(--bg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif}
+main{max-width:980px;margin:0 auto;padding:32px 24px 64px}
+h1,h2{border-bottom:1px solid var(--border);padding-bottom:.3em}
+h1{font-size:2em;margin-top:0} h2{font-size:1.5em;margin-top:1.6em} h3{font-size:1.25em;margin-top:1.4em}
+a{color:var(--link);text-decoration:none} a:hover{text-decoration:underline}
+code{font:85% ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:.2em .4em;border-radius:6px}
+pre{background:var(--code);padding:16px;border-radius:6px;overflow:auto;line-height:1.45}
+pre code{background:none;padding:0;font-size:13px}
+table{border-collapse:collapse;display:block;overflow:auto;margin:16px 0}
+th,td{border:1px solid var(--border);padding:6px 13px;vertical-align:top}
+th{background:var(--code);text-align:left}
+img{max-width:100%;border:1px solid var(--border);border-radius:6px}
+hr{border:0;border-top:1px solid var(--border);margin:32px 0}
+</style></head><body><main>
+<h1>KAHER Research Data Platform: laptop demo</h1>
+<p>A runnable version of the data pipeline in the <strong>KAHER Research Data Access Platform</strong> proposal and the <strong>KLE Tech Technology Build Plan</strong> (17 Nov 2026). It runs on one laptop with Docker, using <strong>synthetic patients only</strong>.</p>
+<pre><code> KAHER restricted zone                         KAHER de-identified zone        KLE Tech
+ ┌───────────────────────────────────────┐     ┌────────────────────────┐      ┌──────────────────────┐
+ │ Clinical PACS (Orthanc, &quot;JNMC_PACS&quot;)  │     │ De-identified store    │      │ Research server      │
+ │        │ C-FIND / C-MOVE              │     │ (Orthanc)              │      │ (Orthanc + OHIF)     │
+ │        ▼                              │     │ FHIR bundles           │      │        ▲             │
+ │ Research DICOM node (Orthanc)         │ ──► │ (+ HAPI FHIR, optional)│      │ Receiver: verify,    │
+ │        │                              │     └────────────────────────┘      │ decrypt, load        │
+ │        ▼                              │                │                    └──────────▲───────────┘
+ │ Data steward console ── Linking key   │      steward review + sign-off                 │
+ │  header / pixel / text de-id service  │                │      encrypted package (AES-256-GCM)
+ └───────────────────────────────────────┘                └─────── over the &quot;VPN&quot; ────────┘
+                                                            labels return the same way ◄──
+</code></pre>
+<p><img src="docs/img/review-ultrasound.png" alt="Steward review: original and de-identified side by side" /></p>
+<h2>What each part does</h2>
+<table>
+<thead>
+<tr>
+<th>Proposal / build plan component</th>
+<th>In this repo</th>
+<th>Tool</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>JNMC PACS</td>
+<td><code>pacs</code> container, preloaded with synthetic studies</td>
+<td>Orthanc</td>
+</tr>
+<tr>
+<td>Research DICOM node (read-only research connection)</td>
+<td><code>research-node</code>; pulls studies from the PACS with standard DICOM C-FIND / C-MOVE</td>
+<td>Orthanc</td>
+</tr>
+<tr>
+<td>Linking key service</td>
+<td><code>linkkey</code>; HMAC-SHA256 research IDs (<code>KR-…</code>) plus a random per-patient date shift, SQLite, token-protected, no published port</td>
+<td>FastAPI</td>
+</tr>
+<tr>
+<td>Image de-identification (DICOM PS3.15)</td>
+<td><code>pipeline/krdp/deid_dicom.py</code>: Basic Profile + Retain Longitudinal (shifted dates) + Clean Descriptors + Retain Patient Characteristics; removes all private tags, every person-name element, overlays; keyed deterministic UIDs</td>
+<td>pydicom</td>
+</tr>
+<tr>
+<td>Burned-in text removal</td>
+<td><code>deid_pixels.py</code>: known-layout masks per modality <strong>and</strong> OCR on every US/CR/DX/SC/OT image, whether or not BurnedInAnnotation is set; head CT/MR flagged for defacing review</td>
+<td>Tesseract</td>
+</tr>
+<tr>
+<td>Free-text de-identification</td>
+<td><code>deid_text.py</code>: Presidio + spaCy, plus Indian phone, Aadhaar, hospital-number, &quot;Dr. Name&quot; and PIN-code recognisers, plus a per-patient deny list; dates in text shifted</td>
+<td>Microsoft Presidio</td>
+</tr>
+<tr>
+<td>Clinical data store</td>
+<td>Reports and lab values from a hospital-system export become de-identified FHIR R4 bundles (Patient with research ID and age band, ImagingStudy, DiagnosticReport, Observation with LOINC, Condition with ICD-10)</td>
+<td>FHIR R4, optional HAPI FHIR</td>
+</tr>
+<tr>
+<td>De-identified image store</td>
+<td><code>deid-store</code></td>
+<td>Orthanc</td>
+</tr>
+<tr>
+<td>Data steward console</td>
+<td>Search PACS → retrieve → de-identify → <strong>side-by-side review</strong> (flagged images first, then a 5% / at-least-20 sample) → sign off → release; opt-out list; audit log; leak check</td>
+<td>FastAPI web app, port 8000</td>
+</tr>
+<tr>
+<td>Release packager</td>
+<td>Encrypted <code>.krdp</code> package: tar of DICOM + FHIR + manifest with SHA-256 for every file; sidecar checksum for the transfer</td>
+<td>AES-256-GCM</td>
+</tr>
+<tr>
+<td>VPN / SFTP</td>
+<td>A shared Docker volume <code>transfer</code> stands in for SFTP over WireGuard</td>
+<td>–</td>
+</tr>
+<tr>
+<td>KLE Tech research server</td>
+<td><code>research-server</code> (project image store, with OHIF and Stone viewers) and <code>receiver</code> (verifies, decrypts, loads, sends a receipt back)</td>
+<td>Orthanc</td>
+</tr>
+<tr>
+<td>Label return</td>
+<td>Files in <code>/projects/&lt;project&gt;/labels/</code> are packaged, encrypted and imported back into the KAHER repository</td>
+<td>–</td>
+</tr>
+<tr>
+<td>Phase 0 gate: &quot;every planted identifier is removed&quot;</td>
+<td><code>leakcheck.py</code>: searches all headers, OCRs all pixels and searches all FHIR text for the 40 planted identifiers</td>
+<td>–</td>
+</tr>
+</tbody>
+</table>
+<h2>Run it on your laptop</h2>
+<p><strong>You need:</strong> <a href="https://www.docker.com/products/docker-desktop/">Docker Desktop</a> (Windows, macOS or Linux, with at least 6 GB of memory allowed), Git, and Python 3.8 or later (only to create the secrets file).</p>
+<pre><code class="language-bash">git clone https://github.com/chickerursr/kaher-research-data-platform.git
+cd kaher-research-data-platform
+python scripts/init_env.py          # writes .env with random keys (never commit it)
+docker compose up --build
+</code></pre>
+<p>The first build downloads Orthanc and Python images and the spaCy model (about 1.5 GB in total). It takes 5 to 10 minutes; later starts take seconds. When the log shows <code>loaded 30 DICOM files into the clinical PACS</code>, open <strong>http://localhost:8000</strong>.</p>
+<h3>iPad only, no laptop: GitHub Codespaces</h3>
+<p>Codespaces runs the whole demo on a GitHub cloud machine; you use it from Safari.</p>
+<ol>
+<li>On the iPad, open <strong>github.com/chickerursr/kaher-research-data-platform</strong> in Safari and sign in.</li>
+<li>Tap <strong>Code → Codespaces → ⋯ → New with options</strong>, choose <strong>4-core</strong> machine, then <strong>Create codespace</strong>.</li>
+<li>Wait. The first start builds everything (about 10 minutes); the terminal shows <code>tail -f /tmp/compose-up.log</code> to watch it.</li>
+<li>Open the <strong>Ports</strong> tab and tap the globe icon next to <strong>Data steward console (8000)</strong>. The viewer links in the console open the Orthanc servers through the same Codespaces addresses.</li>
+</ol>
+<p>For later demos, reopen the same codespace from <strong>Code → Codespaces</strong>; it starts in about a minute with your data intact.</p>
+<ul>
+<li>Ports are <strong>private</strong>: only your signed-in GitHub account can open them. Do not change them to public.</li>
+<li>Free personal accounts include 120 core-hours a month, which is about 30 hours on the 4-core machine. The codespace stops itself after 30 minutes idle; stop it yourself after a demo (<strong>Code → Codespaces → ⋯ → Stop</strong>) and delete it when no longer needed, since stored codespaces count against the 15 GB storage allowance.</li>
+<li>Tip: add the console page to the iPad home screen (Share → Add to Home Screen) for a one-tap start during a meeting, once the codespace is running.</li>
+</ul>
+<h3>Showing it on an iPad with the laptop on the same Wi-Fi</h3>
+<p>Docker cannot run on an iPad, so the laptop runs everything and the iPad opens it in Safari over Wi-Fi.</p>
+<pre><code class="language-bash">python scripts/init_env.py --lan          # detects the laptop's Wi-Fi address, keeps your secrets
+docker compose up -d                      # restart so the new setting takes effect
+</code></pre>
+<p>The script prints the address to open on the iPad, for example <strong>http://192.168.1.20:8000</strong>. The <em>Viewers</em> links in the console point to the laptop too, so the PACS and OHIF viewers also open on the iPad.</p>
+<ul>
+<li>Laptop and iPad must be on the <strong>same Wi-Fi</strong>. Venue and guest Wi-Fi often stop devices reaching each other; your phone's hotspot or a pocket router is the reliable option for meetings.</li>
+<li>The first time, allow Docker through the firewall (Windows: <em>Allow access</em> on the prompt; macOS: System Settings → Network → Firewall).</li>
+<li>In LAN mode the Orthanc servers have no login, so anyone on that Wi-Fi can open them. That is acceptable only because the data is synthetic. Switch back afterwards with <code>python scripts/init_env.py --local</code> and <code>docker compose up -d</code>.</li>
+<li>To screen-share instead, open http://localhost:8000 on the laptop and use AirPlay or the projector.</li>
+</ul>
+<h3>Demo walkthrough (about 5 minutes)</h3>
+<ol>
+<li><strong>Opt-outs</strong>: add <code>JNMC-24-011209</code> (Sunita Desai) to show that an opted-out patient is never retrieved.</li>
+<li><strong>1 Search PACS</strong>: click <em>Search</em> with empty fields to list the four studies, then <em>Retrieve all</em>. This is a real DICOM C-MOVE from the PACS to the research node.</li>
+<li><strong>2 Studies</strong>: click <em>De-identify all retrieved studies</em>. Takes about 30 seconds.</li>
+<li>Click <strong>Review</strong> on the USG abdomen and on the chest X-ray. You see the original and de-identified images side by side (the name burned into the pixels is gone), every header change, and the report before and after. Click <em>Sign off</em> for each study.</li>
+<li><strong>Leak check</strong>: <em>Run leak check</em> should say <strong>PASSED</strong>.</li>
+<li><strong>3 Release</strong>: enter a project name and click <em>Build and send package</em>. Refresh after a few seconds: the receipt from KLE Tech shows the checksums were verified and the images were loaded.</li>
+<li>Open the <strong>KLE Tech research server</strong> at http://localhost:8045. It holds only de-identified studies; open one in the OHIF or Stone viewer.</li>
+<li><strong>Audit log</strong>: every step is recorded.</li>
+</ol>
+<p>To return labels from KLE Tech:</p>
+<pre><code class="language-bash">docker compose exec receiver sh -c 'echo &quot;{\&quot;label\&quot;:\&quot;calculus\&quot;,\&quot;made_by\&quot;:\&quot;dr-demo\&quot;}&quot; &gt; /projects/&lt;project&gt;/labels/case1.json'
+docker compose exec receiver python -m krdp.receiver return-labels &lt;project&gt;
+</code></pre>
+<p>Then open <strong>Labels</strong> in the console and click <em>Import</em>.</p>
+<h3>Viewers</h3>
+<table>
+<thead>
+<tr>
+<th>URL</th>
+<th>What</th>
+<th>Zone</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>http://localhost:8000</td>
+<td>Data steward console</td>
+<td>restricted</td>
+</tr>
+<tr>
+<td>http://localhost:8042/ui/app/</td>
+<td>Clinical PACS (identifiable)</td>
+<td>restricted</td>
+</tr>
+<tr>
+<td>http://localhost:8043/ui/app/</td>
+<td>Research DICOM node (identifiable)</td>
+<td>restricted</td>
+</tr>
+<tr>
+<td>http://localhost:8044/ui/app/</td>
+<td>De-identified store</td>
+<td>de-identified</td>
+</tr>
+<tr>
+<td>http://localhost:8045/ui/app/</td>
+<td>KLE Tech research server</td>
+<td>KLE Tech</td>
+</tr>
+</tbody>
+</table>
+<p>All ports are bound to <code>127.0.0.1</code>, so nothing is reachable from your network.</p>
+<h3>Useful commands</h3>
+<pre><code class="language-bash">docker compose exec steward python -m krdp.leakcheck     # leak check from the command line
+docker compose --profile fhir up -d                     # also start HAPI FHIR (set FHIR_URL in .env first)
+docker compose down                                     # stop
+docker compose down -v                                  # stop and delete all data (fresh start)
+</code></pre>
+<h2>Tests without Docker</h2>
+<p>The tests run the whole pipeline: search, C-MOVE, de-identification, leak check, sign-off, release, receipt, tamper detection and label return. They use an in-memory stand-in for the Orthanc REST API.</p>
+<pre><code class="language-bash">pip install -r pipeline/requirements.txt pytest
+sudo apt install tesseract-ocr          # or: brew install tesseract
+pytest -q tests
+</code></pre>
+<h2>Sample data</h2>
+<p><code>pipeline/krdp/synth.py</code> creates four invented patients with identifiers planted wherever real data hides them:</p>
+<ul>
+<li><strong>CT head</strong>, 16 slices. Includes a &quot;face&quot; region in the low slices, so the image gets flagged for defacing.</li>
+<li><strong>Chest X-ray</strong> with the name and hospital number burned into the image.</li>
+<li><strong>Ultrasound</strong> with a name bar burned into the image and <em>no</em> BurnedInAnnotation flag, which is common with real devices.</li>
+<li><strong>CT chest</strong>, 12 slices.</li>
+<li>In every file: name, hospital number, birth date, address, phone, Aadhaar-style number, accession number, referring and performing clinicians, institution, a free-text image comment naming the patient, and a private vendor tag holding the name.</li>
+<li>A hospital-system export with radiology reports (names, phones, addresses, clinicians) and lab values.</li>
+</ul>
+<p>To try real public data, load studies from The Cancer Imaging Archive into the PACS at http://localhost:8042 (<em>Upload</em>) and add them to the HIS export.</p>
+<h2>Limits of this demo (to do before real patient data)</h2>
+<p>These are deliberate simplifications. Each maps to an item in the build plan.</p>
+<ul>
+<li><strong>Defacing</strong>: head CT/MR is only <em>flagged</em> for review. Add a real defacing tool (for example <code>mri_reface</code> or <code>pydeface</code>) in phase 1.</li>
+<li><strong>Keys</strong>: one shared AES key and one <code>.env</code>. Use per-project keys or public-key encryption (age/GPG), and keep secrets in a vault.</li>
+<li><strong>Network</strong>: the shared volume stands in for the WireGuard VPN plus SFTP, and Docker networks stand in for the separate network segments.</li>
+<li><strong>Login</strong>: there is none; ports are bound to localhost only. Add Keycloak with two-factor login, per-project groups and the monthly user list.</li>
+<li><strong>Annotation</strong>: the research server has the OHIF viewer, but not MONAI Label, Label Studio, JupyterHub work areas, MLflow or central logging.</li>
+<li><strong>Clinical data</strong>: comes from a JSON export. Real HIS/LIS/RIS extraction depends on the vendor answers in section 10 of the build plan.</li>
+<li><strong>Hospital numbers</strong>: the format is a guess (<code>JNMC-24-004512</code>). Set <code>HOSPITAL_NUMBER_REGEX</code> once KAHER IT confirms the real format.</li>
+<li><strong>Linking key</strong>: kept indefinitely, in plain SQLite. The proposal leaves the decision on keeping it to the IEC. Production needs an encrypted database on a separate machine.</li>
+<li><strong>OCR and NER</strong> catch most identifiers, not all, which is why manual review of every release stays mandatory.</li>
+</ul>
+<h2>Repository layout</h2>
+<pre><code>docker-compose.yml        all services, networks and volumes
+scripts/init_env.py       creates .env with random secrets
+pipeline/Dockerfile       one image for steward, linkkey, seed and receiver
+pipeline/krdp/
+  synth.py, seed.py       synthetic data and PACS loading
+  orthanc.py              Orthanc REST client (C-FIND / C-MOVE via the research node)
+  linkkey.py              linking key service + client
+  deid_dicom.py           header de-identification (PS3.15)
+  deid_pixels.py          burned-in text masking (layout masks + OCR)
+  deid_text.py            free-text de-identification (Presidio)
+  fhir.py                 de-identified FHIR R4 bundles
+  pipeline.py             search → retrieve → de-identify → review → release
+  release.py              encrypted package format
+  receiver.py             KLE Tech receiver and label return
+  leakcheck.py            planted-identifier leak check
+  state.py                steward database (audit, opt-outs, studies, releases)
+  steward/                data steward console (FastAPI + templates)
+tests/                    end-to-end test with an in-memory Orthanc
+</code></pre>
+<h2>Licence</h2>
+<p>Released under the <strong><a href="LICENSE.md">PolyForm Noncommercial License 1.0.0</a></strong>.</p>
+<ul>
+<li><strong>Free</strong> for any noncommercial purpose: teaching, learning, research and personal study. This covers use by any educational institution, public research organisation, or public health or government body, which may also copy and adapt it.</li>
+<li><strong>Commercial use</strong> (for example including it in a paid product or service) needs written permission from the author. Please get in touch through this repository.</li>
+</ul>
+<p>Required Notice: Copyright (c) 2026 Satyadhyan Chickerur (https://github.com/chickerursr/kaher-research-data-platform)</p>
+<p>The open-source tools this demo runs (Orthanc, OHIF, pydicom, Presidio, spaCy, Tesseract, FastAPI and others) keep their own licences; the licence above covers this project's own code and content.</p>
+<hr />
+<p>Prepared for the KAHER–KLE Tech joint projects (CAIR, KLE Technological University). Synthetic data only: do not load real patient data until the IEC has approved the repository protocol and the security review in phase 1 has been passed.</p>
+
+</main></body></html>
